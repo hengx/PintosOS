@@ -1,0 +1,105 @@
+#include <stdint.h>
+#include <list.h>
+#include "threads/malloc.h"
+#include "threads/palloc.h"
+#include "threads/thread.h"
+#include "userprog/pagedir.h"
+#include "vm/frame.h"
+#include "vm/page.h"
+#include "vm/swap.h"
+
+uint8_t *frame_evict(enum palloc_flags flag);
+
+uint8_t *
+palloc_get_frame(enum palloc_flags flag, struct spt_entry *spte)
+{
+  uint8_t *frame = palloc_get_page (flag);
+  
+  if(frame) {
+    add_to_frame_table(frame, spte);
+  }
+  else {
+    while(!frame){
+      frame = frame_evict(flag);
+    }
+    if(!frame)
+      PANIC("No free frame.");
+    add_to_frame_table(frame, spte);
+  }
+
+  return frame;
+}
+
+void
+add_to_frame_table(uint8_t *frame, struct spt_entry *spte)
+{
+  
+  // printf("Call add_to_frame_table.\n");
+  struct frame_entry *fe = malloc(sizeof(struct frame_entry));
+
+  fe->frame = frame;
+  fe->spte = spte;
+  fe->owner = thread_current();
+
+  spte->frame = frame;
+
+  list_push_back(&frame_table, &fe->elem);
+  //printf("Call add_to_frame_table finished!!!.\n");
+}
+
+void
+free_frame(uint8_t *frame)
+{
+  struct list_elem *e = list_begin(&frame_table);
+  for(; e != list_end(&frame_table); e = list_next(e)) {
+    struct frame_entry *fe = list_entry(e, struct frame_entry, elem);
+
+    if(fe->frame == frame)
+      {
+	list_remove(e);
+	palloc_free_page(frame);
+	free(fe);
+	break;
+      }
+  }
+}
+
+
+uint8_t *
+frame_evict(enum palloc_flags flag)
+{
+  struct list_elem *e = list_begin(&frame_table);
+
+  while(true){
+    struct frame_entry *fe = list_entry(e, struct frame_entry, elem);
+
+    struct thread *t = fe->owner;
+    if(pagedir_is_accessed(t->pagedir, fe->spte->upage))
+    {
+      pagedir_set_accessed(t->pagedir, fe->spte->upage, false);
+    }
+    else
+    {
+      if(pagedir_is_dirty(t->pagedir, fe->spte->upage)) {
+        if(fe->spte->mmap)
+	  file_write_at(fe->spte->file,
+			fe->frame,
+			fe->spte->read_bytes,
+			fe->spte->ofs);
+        else {
+          swap_out (fe->spte);
+	}
+      }
+      fe->spte->loaded = false;
+      list_remove(&fe->elem);
+      pagedir_clear_page(t->pagedir, fe->spte->upage);
+      palloc_free_page(fe->frame);
+      free(fe);
+      return palloc_get_page(flag);
+     }
+
+     e = list_next(e);
+     if(e == list_end(&frame_table))
+       e = list_begin(&frame_table);
+  }  
+}
